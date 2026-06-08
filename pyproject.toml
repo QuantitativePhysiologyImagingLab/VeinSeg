@@ -2,7 +2,7 @@
 name = "veinseg"
 version = "1.0.0"
 description = "Physics-informed cerebral vein segmentation from QSM"
-readme = "README.md"
+readme = "README_pypi.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
@@ -10,6 +10,7 @@ authors = [
 ]
 keywords = ["QSM", "vein segmentation", "MRI", "neuroimaging", "deep learning"]
 classifiers = [
+    "License :: OSI Approved :: Apache Software License",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Programming Language :: Python :: 3",
