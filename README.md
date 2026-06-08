@@ -139,9 +139,3 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz \
 Weights are hosted on Hugging Face: [YousifKhoury/VeinSeg](https://huggingface.co/YousifKhoury/VeinSeg)
 
 Downloaded automatically on first use by `veinseg-install`.
-
----
-
-## License
-
-[MIT](LICENSE)
