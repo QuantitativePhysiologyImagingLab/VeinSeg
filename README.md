@@ -54,7 +54,7 @@ The model is a 3D attention U-Net with two key components:
 VeinSeg requires PyTorch. Install your preferred version first (see [pytorch.org](https://pytorch.org) for CUDA-specific instructions), then:
 
 ```bash
-pip install veinseg
+pip install veinseg-qsm
 ```
 
 Download the model weights (run once only):
