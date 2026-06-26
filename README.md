@@ -20,7 +20,7 @@
 VeinSeg is a 3D deep learning tool for automatic segmentation of cerebral veins from Quantitative Susceptibility Mapping (QSM). It is trained on multi-site, multi-field-strength data (3T and 7T) across five QSM reconstruction methods (TGV, MEDI, L1, STAR, iLSQR) and uses a physics-informed training objective combining:
 
 - **Supervised** Dice + Cross-Entropy loss
-- **Self-supervised** physics-informed dipole field matching loss
+- **Self-supervised** physics-informed dipole field consistency loss
 - **Self-supervised** Frangi vesselness shape loss
 
 ## Model Architecture
@@ -54,19 +54,19 @@ The model is a 3D attention U-Net with two key components:
 VeinSeg requires PyTorch. Install your preferred version first (see [pytorch.org](https://pytorch.org) for CUDA-specific instructions), then:
 
 ```bash
-pip install veinseg
+pip install veinseg-qsm
 ```
 
-Download the model weights (~600 MB, once only):
+Download the model weights (run once only):
 
 ```bash
 veinseg-install /path/to/models/dir
 ```
 
-The checkpoint is downloaded from [Hugging Face](https://huggingface.co/YousifKhoury/VeinSeg) and the path is saved automatically. On shared HPC clusters, one person can install to a shared directory and others set:
+The checkpoint is downloaded from [Hugging Face](https://huggingface.co/YousifKhoury/VeinSeg) and the path is saved automatically. You can also set the model path manually using:
 
 ```bash
-export VEINSEG_CHECKPOINT=/shared/models/veinseg/checkpoint.pth
+export VEINSEG_CHECKPOINT=/models/veinseg/checkpoint.pth
 ```
 
 ---
