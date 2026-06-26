@@ -28,7 +28,7 @@ from veinseg.dipole_conv  import (dipole_field_from_chi_xyz,
                                    voxel_size_from_affine,
                                    b0_dir_from_image_affine)
 
-FRANGI_SIGMAS = (0.6, 1.2, 1.8)
+FRANGI_SIGMAS = (0.1, 0.5, 0.8, 1.0)
 METHOD_TO_IDX = {"tgv": 0, "medi": 1, "l1": 2, "star": 3, "ilsqr": 4}
 
 
@@ -144,12 +144,11 @@ def main():
 
     # ---- channel 2: Frangi vesselness ----
     print("[veinseg] computing Frangi vesselness ...")
-    bv    = qsm_t[qsm_t != 0]
-    qsm_z = (qsm_t - bv.mean()) / (bv.std() + 1e-8) if bv.numel() > 100 else qsm_t
+    qsm_z = (qsm_t - qsm_t.mean()) / (qsm_t.std() + 1e-8)
     with torch.no_grad():
         V, _ = frangi_3d(qsm_z.unsqueeze(0).unsqueeze(0),
                          sigmas=FRANGI_SIGMAS,
-                         alpha=0.5, beta=0.5, c=15.0,
+                         alpha=0.2, beta=0.3, c=5.0,
                          bright_vessels=True)
     ch2 = V[0, 0].numpy()
     print(f"[veinseg] Frangi max={ch2.max():.4f}  nonzero={(ch2 > 0).sum()}")
@@ -176,9 +175,9 @@ def main():
     model = PriorGatedUNetWithAttentionInfer(
         in_channels=3, out_channels=2,
         patch_size=tuple(configuration_manager.patch_size),
-        deep_supervision=True, num_domains=5, domain_embed_dim=32,
+        deep_supervision=False, num_domains=5, domain_embed_dim=32,
     )
-    model.load_state_dict(ckpt["network_weights"])
+    model.load_state_dict(ckpt["network_weights"], strict=False)
     model.default_domain_idx = METHOD_TO_IDX[args.r.lower()]
     model.default_field_idx  = 0 if args.f.lower() == "7t" else 1
     model.to(device).eval()

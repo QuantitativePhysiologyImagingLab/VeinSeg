@@ -171,8 +171,8 @@ def _frangi_3d_single(
     Rb = (l1.abs() / torch.sqrt(l2.abs() * l3.abs() + eps))
     S  = torch.sqrt((l1**2 + l2**2 + l3**2).clamp_min(eps))
 
-    # Vesselness (Frangi '98)
-    expRa = torch.exp(-(Ra**2) / (2*alpha**2))
+    # Vesselness
+    expRa = 1.0 - torch.exp(-(Ra**2) / (2*alpha**2))  # suppress sheets
     expRb = torch.exp(-(Rb**2) / (2*beta**2))
     expS  = 1.0 - torch.exp(-(S**2) / (2*c**2))
     V = expRa * expRb * expS
