@@ -8,7 +8,7 @@ Physics-informed deep learning for cerebral vein segmentation from QSM.
 
 ## Overview
 
-VeinSeg segments cerebral veins from Quantitative Susceptibility Mapping (QSM). It supports multi-site, multi-field-strength data (3T and 7T) across five QSM reconstruction methods (TGV, MEDI, L1, STAR, iLSQR) using a physics-informed training objective.
+VeinSeg segments cerebral veins from Quantitative Susceptibility Mapping (QSM). It supports multi-site, multi-field-strength data (3T and 7T) across five QSM reconstruction methods (TGV, MEDI, L1, STAR, iLSQR) and R2* maps using a physics-informed training objective.
 
 ---
 
@@ -20,7 +20,7 @@ Install PyTorch first ([pytorch.org](https://pytorch.org)), then:
 pip install veinseg
 ```
 
-Download the model weights (~600 MB, once only):
+Download the model weights (~290 MB, once only):
 
 ```bash
 veinseg-install /path/to/models/dir
@@ -44,8 +44,8 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz
 
 | Flag | Description |
 |---|---|
-| `-i` | QSM susceptibility map (`.nii` / `.nii.gz`, ppm) |
-| `-r` | QSM reconstruction method: `tgv` \| `medi` \| `l1` \| `star` \| `ilsqr` |
+| `-i` | QSM susceptibility map (`.nii` / `.nii.gz`, ppm), or R2* map with `-r r2star` |
+| `-r` | Reconstruction method: `tgv` \| `medi` \| `l1` \| `star` \| `ilsqr` \| `r2star` |
 | `-f` | MRI field strength: `7t` \| `3t` |
 | `-o` | Output binary vein mask |
 | `-p` | Output vein probability map |
@@ -57,6 +57,7 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz
 | `--local-field PATH` | — | Measured background-removed local field (skips dipole computation) |
 | `--local-field-units` | `auto` | `hz` \| `ppm` \| `auto` |
 | `--b0 X Y Z` | `0 0 1` | B0 direction in world/scanner axes |
+| `--frangi-erode-mm` | `5` | Zero the Frangi prior within this distance (mm) of the brain edge |
 | `--threshold` | `0.5` | Probability threshold for binary mask |
 | `--step-size` | `0.5` | Sliding window overlap as fraction of patch |
 | `--no-tta` | off | Disable test-time augmentation |

@@ -114,8 +114,8 @@ class FiLMLayer(nn.Module):
 
 
 class UNetWithAttention(nn.Module):
-    def __init__(self, in_channels=3, out_channels=2, patch_size=(128, 160, 112),
-                 deep_supervision=False, base_features=64, num_domains=5, domain_embed_dim=32):
+    def __init__(self, in_channels=1, out_channels=2, patch_size=(128, 160, 112),
+                 deep_supervision=False, base_features=64, num_domains=6, domain_embed_dim=32):
         super().__init__()
         self.deep_supervision = deep_supervision
         self.num_domains = num_domains
@@ -139,8 +139,16 @@ class UNetWithAttention(nn.Module):
             self.film_enc3   = FiLMLayer(domain_embed_dim, bf * 4)
             self.film_enc4   = FiLMLayer(domain_embed_dim, bf * 8)
             self.film_bottle = FiLMLayer(domain_embed_dim, bf * 16)
+        else:
+            self.domain_embed = None
+            self.field_embed  = None
 
-    def forward(self, x, domain_idx=None, field_idx=None):
+    def forward(self, x, domain_idx=None, field_idx=None, extra_emb=None, x1_transform=None):
+        """
+        extra_emb: optional (B, domain_embed_dim) tensor added to the FiLM embedding.
+        x1_transform: optional callable applied to the first encoder stage's output
+        (post-FiLM) before it feeds enc2 and the first skip connection.
+        """
         if not self.training:
             self.decoder.deep_supervision = False
         else:
@@ -152,54 +160,106 @@ class UNetWithAttention(nn.Module):
             if field_idx is None:
                 field_idx = torch.full((x.shape[0],), self.default_field_idx, dtype=torch.long, device=x.device)
             emb = self.domain_embed(domain_idx) + self.field_embed(field_idx)
+            if extra_emb is not None:
+                emb = emb + extra_emb
             x1 = self.film_enc1(self.enc1(x), emb)
+            if x1_transform is not None:
+                x1 = x1_transform(x1)
             x2 = self.film_enc2(self.enc2(x1), emb)
             x3 = self.film_enc3(self.enc3(x2), emb)
             x4 = self.film_enc4(self.enc4(x3), emb)
             b  = self.film_bottle(self.bottleneck(x4), emb)
         else:
-            x1 = self.enc1(x); x2 = self.enc2(x1); x3 = self.enc3(x2); x4 = self.enc4(x3)
+            x1 = self.enc1(x)
+            if x1_transform is not None:
+                x1 = x1_transform(x1)
+            x2 = self.enc2(x1); x3 = self.enc3(x2); x4 = self.enc4(x3)
             b  = self.bottleneck(x4)
 
         return self.decoder(b, x4, x3, x2, x1)
 
 
 class PriorGate(nn.Module):
-    def __init__(self, in_priors=2):
+    """gate = gamma * sigmoid(conv1x1(priors)); applied as img * (1 + gate)."""
+    def __init__(self, n_priors=2):
         super().__init__()
-        self.prior_to_gate = nn.Sequential(nn.Conv3d(in_priors, 1, 1, bias=True), nn.Sigmoid())
+        self.to_gate = nn.Conv3d(n_priors, 1, kernel_size=1, bias=True)
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, priors):
-        return self.gamma * self.prior_to_gate(priors)
+        return self.gamma * torch.sigmoid(self.to_gate(priors))
+
+    def constant_gate(self, ref):
+        """Gate for an all-zero prior input (used when no priors are supplied)."""
+        const = self.gamma * torch.sigmoid(self.to_gate.bias)
+        return const.view(1, 1, 1, 1, 1).to(device=ref.device, dtype=ref.dtype)
 
 
-class PriorGatedUNetWithAttention(UNetWithAttention):
-    def __init__(self, in_channels, out_channels, patch_size, deep_supervision=True,
-                 num_domains=5, domain_embed_dim=32):
-        super().__init__(in_channels, out_channels, patch_size, deep_supervision,
+class R2starAdapter(nn.Module):
+    """Residual conv block after enc1, applied only to R2* samples."""
+    def __init__(self, channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv3d(channels, channels, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(channels),
+            nn.ELU(inplace=True),
+            nn.Conv3d(channels, channels, kernel_size=3, padding=1),
+        )
+        nn.init.zeros_(self.block[-1].weight); nn.init.zeros_(self.block[-1].bias)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class PriorGatedSingleChannelUNet(UNetWithAttention):
+    """
+    Single-channel encoder: only the primary image (QSM or R2*) enters enc1,
+    modulated by a gate computed from the prior channels (local field, Frangi).
+    """
+    def __init__(self, out_channels=2, patch_size=(128, 160, 112), deep_supervision=False,
+                 num_domains=6, domain_embed_dim=32, n_priors=2, base_features=64):
+        super().__init__(in_channels=1, out_channels=out_channels, patch_size=patch_size,
+                         deep_supervision=deep_supervision, base_features=base_features,
                          num_domains=num_domains, domain_embed_dim=domain_embed_dim)
-        n_priors = max(0, in_channels - 1)
-        assert n_priors >= 1
-        self.prior_gate = PriorGate(in_priors=n_priors)
+        self.prior_gate = PriorGate(n_priors=n_priors)
+        self.r2star_adapter = R2starAdapter(base_features)
+        self.pos_mlp = nn.Sequential(
+            nn.Linear(3, domain_embed_dim),
+            nn.SiLU(),
+            nn.Linear(domain_embed_dim, domain_embed_dim),
+        )
+        nn.init.zeros_(self.pos_mlp[-1].weight); nn.init.zeros_(self.pos_mlp[-1].bias)
 
-    def forward(self, x, domain_idx=None, field_idx=None):
-        img = x[:, 0:1]
-        pri = x[:, 1:]
-        A = self.prior_gate(pri)
-        x_mod = torch.cat([img * (1 + A), x[:, 1:]], dim=1)
-        return super().forward(x_mod, domain_idx=domain_idx, field_idx=field_idx)
+    def forward(self, img, priors=None, domain_idx=None, field_idx=None, pos=None):
+        gate = self.prior_gate(priors) if priors is not None else self.prior_gate.constant_gate(img)
+        gated = img * (1.0 + gate)
+        extra_emb = self.pos_mlp(pos) if pos is not None else None
+
+        if domain_idx is None:
+            domain_idx = torch.full((img.shape[0],), self.default_domain_idx,
+                                    dtype=torch.long, device=img.device)
+        r2star_gate = (domain_idx == R2STAR_DOMAIN_IDX).to(img.dtype).view(-1, 1, 1, 1, 1)
+
+        def _r2star_x1_transform(x1):
+            return x1 + r2star_gate * self.r2star_adapter(x1)
+
+        return super().forward(gated, domain_idx=domain_idx, field_idx=field_idx,
+                               extra_emb=extra_emb, x1_transform=_r2star_x1_transform)
 
 
-class PriorGatedUNetWithAttentionInfer(PriorGatedUNetWithAttention):
-    def forward(self, x, domain_idx=None, field_idx=None):
-        y = super().forward(x, domain_idx=domain_idx, field_idx=field_idx)
-        use_ds = bool(getattr(self, "do_ds", False)
-                      or getattr(self, "deep_supervision", False)
-                      or getattr(self, "enable_deep_supervision", False))
+class PriorGatedSingleChannelUNetInfer(PriorGatedSingleChannelUNet):
+    """
+    nnUNetPredictor entry point: takes the 3-channel preprocessed tensor
+    [primary, local field, Frangi] and splits it into image + priors.
+    """
+    def forward(self, x, domain_idx=None, field_idx=None, pos=None):
+        y = super().forward(x[:, 0:1], priors=x[:, 1:3],
+                            domain_idx=domain_idx, field_idx=field_idx, pos=pos)
         if isinstance(y, (list, tuple)):
-            return y if use_ds else y[0]
-        return [y] if use_ds else y
+            return y[0]
+        return y
 
 
-METHOD_TO_IDX = {'TGV': 0, 'medi': 1, 'l1': 2, 'star': 3, 'ilsqr': 4}
+DOMAIN_METHODS = ['TGV', 'medi', 'l1', 'star', 'ilsqr', 'R2star']
+METHOD_TO_IDX = {m: i for i, m in enumerate(DOMAIN_METHODS)}
+R2STAR_DOMAIN_IDX = METHOD_TO_IDX['R2star']

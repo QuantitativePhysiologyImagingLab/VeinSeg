@@ -46,7 +46,7 @@ def install_main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("usage: veinseg-install <directory>")
         print()
-        print("  Downloads the VeinSeg checkpoint (~600 MB) from Hugging Face")
+        print("  Downloads the VeinSeg checkpoint (~290 MB) from Hugging Face")
         print("  into <directory>/checkpoint.pth and records the path so that")
         print("  the veinseg command can find it automatically.")
         print()
@@ -62,7 +62,7 @@ def install_main():
         print(f"[veinseg-install] checkpoint already exists at {ckpt_path}")
     else:
         print(f"[veinseg-install] downloading {HF_REPO}/{HF_FILENAME} ...")
-        print( "[veinseg-install] (~600 MB, this only happens once)")
+        print( "[veinseg-install] (~290 MB, this only happens once)")
         from huggingface_hub import hf_hub_download
         hf_hub_download(
             repo_id=HF_REPO,

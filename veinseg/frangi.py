@@ -121,6 +121,92 @@ def _hessian_3d(I: Tensor, sigma: float) -> Tuple[Tensor, Tensor, Tensor, Tensor
     I_xy = s2*I_xy; I_xz = s2*I_xz; I_yz = s2*I_yz
     return I_xx, I_yy, I_zz, I_xy, I_xz, I_yz
 
+def eigh_3x3_symmetric(H: torch.Tensor):
+    """
+    H: (B, N, 3, 3) symmetric
+    Returns:
+       evals: (B, N, 3)
+       evecs: (B, N, 3, 3)
+    """
+    # extract components
+    a = H[...,0,0]
+    b = H[...,1,1]
+    c = H[...,2,2]
+    d = H[...,0,1]
+    e = H[...,0,2]
+    f = H[...,1,2]
+
+    # --- eigenvalues using analytic cubic solution (guaranteed real) ---
+    # trace
+    m = (a + b + c) / 3.0
+
+    # centered matrix entries
+    a_ = a - m
+    b_ = b - m
+    c_ = c - m
+
+    # p^2 = 1/6 * (sum of squares of centered diag + 2*d^2 + 2*e^2 + 2*f^2)
+    p2 = (a_*a_ + b_*b_ + c_*c_ + 2*(d*d + e*e + f*f)) / 6.0
+    p = torch.sqrt(p2.clamp_min(1e-12))
+
+    # build matrix B = (1/p) * (H - mI)
+    B00 = a_ / p
+    B11 = b_ / p
+    B22 = c_ / p
+    B01 = d / p
+    B02 = e / p
+    B12 = f / p
+
+    # determinant of B
+    detB = (
+        B00*(B11*B22 - B12*B12)
+        - B01*(B01*B22 - B12*B02)
+        + B02*(B01*B12 - B11*B02)
+    )
+
+    # Clamp AWAY from the exact +-1 boundary, not at it: d(acos)/dx =
+    # -1/sqrt(1-x^2) is finite everywhere strictly inside (-1,1) but blows up
+    # to +-Inf/NaN exactly at the endpoints. Clamping the value to [-1,1]
+    # keeps the forward pass finite but does nothing for the backward pass --
+    # detB lands at exactly +-1.0 constantly (any near-degenerate/locally
+    # flat Hessian, extremely common on a mostly-uniform probability map),
+    # so this NaN'd on essentially every step once Frangi became
+    # differentiable. A small epsilon margin keeps acos' large-but-finite so
+    # grad clipping (already in train_step) can do its job.
+    _eps = 1e-6
+    detB = detB.clamp(-1.0 + _eps, 1.0 - _eps)
+
+    phi = torch.acos(detB) / 3.0
+
+    # eigenvalues (closed form)
+    eig1 = m + 2*p*torch.cos(phi + 0)
+    eig3 = m + 2*p*torch.cos(phi + 2*torch.pi/3)
+    eig2 = 3*m - eig1 - eig3     # ensures ordering
+
+    # sort ascending by absolute magnitude (Frangi convention)
+    evals = torch.stack([eig1, eig2, eig3], dim=-1)
+
+    # --- eigenvectors ---
+    # get eigenvectors for each eigenvalue by solving (H - λI)v = 0
+    # do it with torch.linalg.cross + normalization
+    evecs = []
+    for i in range(3):
+        lam = evals[..., i][...,None,None]
+        M = H - lam * torch.eye(3, device=H.device, dtype=H.dtype)
+
+        # pick two rows and take cross product
+        v = torch.linalg.cross(M[...,0,:], M[...,1,:])
+        v = v / (v.norm(dim=-1, keepdim=True).clamp_min(1e-12))
+        evecs.append(v)
+
+    evecs = torch.stack(evecs, dim=-1)  # (B,N,3,3)
+    return evals, evecs
+
+# -----------------------------
+# Frangi 3D (single scale)
+# -----------------------------
+
+
 # -----------------------------
 # Frangi 3D (single scale)
 # -----------------------------
@@ -156,7 +242,14 @@ def _frangi_3d_single(
     B, _, D, H_, W_, _, _ = H.shape
     H = H.view(B, 1, D, H_, W_, 3, 3).flatten(1, 4)
 
-    evals, evecs = torch.linalg.eigh(H)
+    # Analytic 3x3 eigensolver (same as used to build the training priors)
+    orig_dtype = H.dtype
+    H32 = H.to(torch.float32)
+    H32 = 0.5 * (H32 + H32.transpose(-1, -2))
+    H32 = torch.nan_to_num(H32, nan=0.0, posinf=1e4, neginf=-1e4).clamp(min=-1e4, max=1e4)
+    evals, evecs = eigh_3x3_symmetric(H32.view(-1, 3, 3))
+    evals = evals.view(B, D * H_ * W_, 3).to(orig_dtype)
+    evecs = evecs.view(B, D * H_ * W_, 3, 3).to(orig_dtype)
 
     # Sort by |lambda|
     idx = torch.argsort(evals.abs(), dim=-1, stable=True)

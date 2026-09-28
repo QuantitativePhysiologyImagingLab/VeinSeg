@@ -1,6 +1,6 @@
 [project]
 name = "veinseg-qsm"
-version = "1.0.3"
+version = "1.1.0"
 description = "Physics-informed cerebral vein segmentation from QSM"
 readme = "README_pypi.md"
 requires-python = ">=3.10"

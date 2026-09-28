@@ -22,14 +22,15 @@ import nibabel as nib
 import torch
 
 from veinseg._checkpoint import get_checkpoint
-from veinseg.model_arch   import PriorGatedUNetWithAttentionInfer
+from veinseg.model_arch   import PriorGatedSingleChannelUNetInfer
 from veinseg.frangi       import frangi_3d
 from veinseg.dipole_conv  import (dipole_field_from_chi_xyz,
                                    voxel_size_from_affine,
                                    b0_dir_from_image_affine)
 
 FRANGI_SIGMAS = (0.1, 0.5, 0.8, 1.0)
-METHOD_TO_IDX = {"tgv": 0, "medi": 1, "l1": 2, "star": 3, "ilsqr": 4}
+METHOD_TO_IDX = {"tgv": 0, "medi": 1, "l1": 2, "star": 3, "ilsqr": 4, "r2star": 5}
+FRANGI_ERODE_MM = 5.0
 
 
 def _print_help_and_exit():
@@ -39,18 +40,21 @@ usage:
   veinseg -i QSM -r METHOD -f FIELD -o BINARY -p PROB [options]
 
 required:
-  -i QSM        QSM susceptibility map (.nii / .nii.gz, ppm)
-  -r METHOD     QSM reconstruction method: tgv | medi | l1 | star | ilsqr
+  -i QSM        QSM susceptibility map (.nii / .nii.gz, ppm), or R2* map (1/s)
+                when -r r2star
+  -r METHOD     Reconstruction method: tgv | medi | l1 | star | ilsqr | r2star
   -f FIELD      MRI field strength: 3t | 7t
   -o BINARY     Output binary vein mask (.nii.gz)
   -p PROB       Output vein probability map (.nii.gz)
 
 optional:
   --local-field PATH          Measured background-removed local field
-                              (skips dipole computation — for best accuracy)
+                              (skips dipole computation — for best accuracy;
+                              with -r r2star the field is zero-filled if omitted)
   --local-field-units auto|hz|ppm
                               Units of --local-field (default: auto-detect)
   --b0 X Y Z                 B0 direction in world/scanner axes (default: 0 0 1)
+  --frangi-erode-mm MM       Zero Frangi within MM of the brain edge (default: 5)
   --threshold T              Binarization threshold, 0-1 (default: 0.5)
   --step-size N              Sliding window step as fraction of patch (default: 0.5)
   --no-tta                   Disable test-time augmentation (mirroring)
@@ -68,8 +72,8 @@ examples:
           --out-field field.nii.gz --out-frangi frangi.nii.gz
 
 note:
-  The model checkpoint (~600 MB) is downloaded automatically from Hugging Face
-  on first use and cached at ~/.cache/veinseg/checkpoint.pth.
+  Download the model checkpoint (~290 MB) once with: veinseg-install <dir>
+  or point to one with: export VEINSEG_CHECKPOINT=/path/to/checkpoint.pth
 """)
     sys.exit(0)
 
@@ -90,6 +94,7 @@ def main():
                     choices=["auto", "hz", "ppm"])
     ap.add_argument("--b0", nargs=3, type=float, default=[0., 0., 1.],
                     metavar=("X", "Y", "Z"))
+    ap.add_argument("--frangi-erode-mm", type=float, default=FRANGI_ERODE_MM)
     ap.add_argument("--step-size",  type=float, default=0.5)
     ap.add_argument("--no-tta",     action="store_true")
     ap.add_argument("--device",     default="auto",
@@ -136,6 +141,9 @@ def main():
             zf  = tuple(q / l for q, l in zip(qsm.shape, ch1.shape))
             print(f"[veinseg] resampling local field {ch1.shape} -> {qsm.shape}")
             ch1 = ndimage_zoom(ch1, zf, order=1).astype(np.float32)
+    elif args.r == "r2star":
+        print("[veinseg] r2star without --local-field: using zero-filled local field")
+        ch1 = np.zeros_like(qsm)
     else:
         print("[veinseg] computing dipole local field from QSM ...")
         ch1 = dipole_field_from_chi_xyz(
@@ -151,6 +159,12 @@ def main():
                          alpha=0.2, beta=0.3, c=5.0,
                          bright_vessels=True)
     ch2 = V[0, 0].numpy()
+    if args.frangi_erode_mm > 0:
+        # zero Frangi near the brain surface, as done for the training data
+        from scipy.ndimage import distance_transform_edt
+        brain = np.abs(qsm) > 1e-5
+        dist_mm = distance_transform_edt(brain, sampling=(vx, vy, vz))
+        ch2 = ch2 * (dist_mm > args.frangi_erode_mm)
     print(f"[veinseg] Frangi max={ch2.max():.4f}  nonzero={(ch2 > 0).sum()}")
 
     if args.out_field:
@@ -172,12 +186,12 @@ def main():
     configuration_manager = plans_manager.get_configuration(
                                 ckpt["init_args"]["configuration"])
 
-    model = PriorGatedUNetWithAttentionInfer(
-        in_channels=3, out_channels=2,
+    model = PriorGatedSingleChannelUNetInfer(
+        out_channels=2,
         patch_size=tuple(configuration_manager.patch_size),
-        deep_supervision=False, num_domains=5, domain_embed_dim=32,
+        deep_supervision=True, num_domains=6, domain_embed_dim=32,
     )
-    model.load_state_dict(ckpt["network_weights"], strict=False)
+    model.load_state_dict(ckpt["network_weights"], strict=True)
     model.default_domain_idx = METHOD_TO_IDX[args.r.lower()]
     model.default_field_idx  = 0 if args.f.lower() == "7t" else 1
     model.to(device).eval()
