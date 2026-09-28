@@ -94,7 +94,7 @@ def main():
     print(f"[veinseg] loading checkpoint from {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+    from veinseg.predictor import PositionAwarePredictor
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
 
     # Only the primary channel is used: its normalization is plans channel 0
@@ -117,8 +117,8 @@ def main():
     print(f"[veinseg] method={args.r} (domain={model.default_domain_idx})  "
           f"field={args.f} (field_idx={model.default_field_idx})")
 
-    # ---- nnUNetPredictor (identical to training-time inference) ----
-    predictor = nnUNetPredictor(
+    # ---- nnUNetPredictor + per-tile patch position (as in training) ----
+    predictor = PositionAwarePredictor(
         tile_step_size=args.step_size,
         use_gaussian=True,
         use_mirroring=not args.no_tta,

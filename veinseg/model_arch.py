@@ -251,9 +251,14 @@ class PriorGatedSingleChannelUNetInfer(PriorGatedSingleChannelUNet):
     """
     nnUNetPredictor entry point. A 1-channel input uses the learned constant
     prior gate; a 3-channel [primary, local field, Frangi] input uses the
-    priors to compute the gate, as during training.
+    priors to compute the gate, as during training. When pos is not passed,
+    current_pos (set per tile by PositionAwarePredictor) is used.
     """
+    current_pos = None
+
     def forward(self, x, domain_idx=None, field_idx=None, pos=None):
+        if pos is None:
+            pos = self.current_pos
         priors = x[:, 1:3] if x.shape[1] > 1 else None
         y = super().forward(x[:, 0:1], priors=priors,
                             domain_idx=domain_idx, field_idx=field_idx, pos=pos)
