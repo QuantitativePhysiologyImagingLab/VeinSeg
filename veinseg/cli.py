@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-VeinSeg: physics-informed cerebral vein segmentation from QSM.
+VeinSeg: cerebral vein segmentation from QSM or R2*.
 
 Pipeline:
-  1. Compute dipole local field from QSM (or use provided measured field)
-  2. Compute Frangi vesselness from QSM
-  3. Run nnUNetPredictor (identical preprocessing + sliding window to training)
-  4. Save binary mask and probability map
+  1. Load the single input image (QSM or R2*)
+  2. Run nnUNetPredictor (identical preprocessing + sliding window to training)
+  3. Save binary mask and probability map
+
+The network's prior gate (trained from local field + Frangi) falls back to its
+learned constant value when no priors are supplied, so only the image is needed.
 """
 import os
 import sys
@@ -23,24 +25,18 @@ import torch
 
 from veinseg._checkpoint import get_checkpoint
 from veinseg.model_arch   import PriorGatedSingleChannelUNetInfer
-from veinseg.frangi       import frangi_3d
-from veinseg.dipole_conv  import (dipole_field_from_chi_xyz,
-                                   voxel_size_from_affine,
-                                   b0_dir_from_image_affine)
 
-FRANGI_SIGMAS = (0.1, 0.5, 0.8, 1.0)
 METHOD_TO_IDX = {"tgv": 0, "medi": 1, "l1": 2, "star": 3, "ilsqr": 4, "r2star": 5}
-FRANGI_ERODE_MM = 5.0
 
 
 def _print_help_and_exit():
-    print("""veinseg — physics-informed cerebral vein segmentation from QSM
+    print("""veinseg — cerebral vein segmentation from QSM or R2*
 
 usage:
-  veinseg -i QSM -r METHOD -f FIELD -o BINARY -p PROB [options]
+  veinseg -i IMAGE -r METHOD -f FIELD -o BINARY -p PROB [options]
 
 required:
-  -i QSM        QSM susceptibility map (.nii / .nii.gz, ppm), or R2* map (1/s)
+  -i IMAGE      QSM susceptibility map (.nii / .nii.gz, ppm), or R2* map (1/s)
                 when -r r2star
   -r METHOD     Reconstruction method: tgv | medi | l1 | star | ilsqr | r2star
   -f FIELD      MRI field strength: 3t | 7t
@@ -48,28 +44,14 @@ required:
   -p PROB       Output vein probability map (.nii.gz)
 
 optional:
-  --local-field PATH          Measured background-removed local field
-                              (skips dipole computation — for best accuracy;
-                              with -r r2star the field is zero-filled if omitted)
-  --local-field-units auto|hz|ppm
-                              Units of --local-field (default: auto-detect)
-  --b0 X Y Z                 B0 direction in world/scanner axes (default: 0 0 1)
-  --frangi-erode-mm MM       Zero Frangi within MM of the brain edge (default: 5)
   --threshold T              Binarization threshold, 0-1 (default: 0.5)
   --step-size N              Sliding window step as fraction of patch (default: 0.5)
   --no-tta                   Disable test-time augmentation (mirroring)
   --device MODE              auto | cpu | cuda  (default: auto)
 
-channel outputs (save intermediate model inputs for inspection):
-  --out-field PATH           Save local field channel used (ppm)
-  --out-frangi PATH          Save Frangi vesselness channel ([0,1])
-
 examples:
-  veinseg -i qsm.nii.gz -r tgv  -f 7t -o mask.nii.gz -p prob.nii.gz
-  veinseg -i qsm.nii.gz -r medi -f 7t -o mask.nii.gz -p prob.nii.gz \\
-          --local-field bgrm_field.nii.gz
-  veinseg -i qsm.nii.gz -r tgv  -f 7t -o mask.nii.gz -p prob.nii.gz \\
-          --out-field field.nii.gz --out-frangi frangi.nii.gz
+  veinseg -i qsm.nii.gz    -r tgv    -f 7t -o mask.nii.gz -p prob.nii.gz
+  veinseg -i r2star.nii.gz -r r2star -f 3t -o mask.nii.gz -p prob.nii.gz
 
 note:
   Download the model checkpoint (~290 MB) once with: veinseg-install <dir>
@@ -84,103 +66,40 @@ def main():
 
     import argparse
     ap = argparse.ArgumentParser(prog="veinseg", add_help=False)
-    ap.add_argument("-i",  required=True, metavar="QSM")
+    ap.add_argument("-i",  required=True, metavar="IMAGE")
     ap.add_argument("-r",  required=True, choices=list(METHOD_TO_IDX.keys()))
     ap.add_argument("-f",  required=True, choices=["3t", "7t"])
     ap.add_argument("-o",  required=True, metavar="BINARY")
     ap.add_argument("-p",  required=True, metavar="PROB")
-    ap.add_argument("--local-field",       default=None, metavar="PATH")
-    ap.add_argument("--local-field-units", default="auto",
-                    choices=["auto", "hz", "ppm"])
-    ap.add_argument("--b0", nargs=3, type=float, default=[0., 0., 1.],
-                    metavar=("X", "Y", "Z"))
-    ap.add_argument("--frangi-erode-mm", type=float, default=FRANGI_ERODE_MM)
     ap.add_argument("--step-size",  type=float, default=0.5)
     ap.add_argument("--no-tta",     action="store_true")
     ap.add_argument("--device",     default="auto",
                     choices=["auto", "cpu", "cuda"])
     ap.add_argument("--threshold",  type=float, default=0.5)
-    ap.add_argument("--out-field",  default=None, metavar="PATH")
-    ap.add_argument("--out-frangi", default=None, metavar="PATH")
     args = ap.parse_args()
 
     device = _pick_device(args.device)
     print(f"[veinseg] device: {device}")
 
-    # ---- load QSM ----
+    # ---- load image ----
     print(f"[veinseg] loading {args.i}")
-    qsm_nii = nib.load(args.i)
-    qsm     = np.nan_to_num(qsm_nii.get_fdata(dtype=np.float32),
-                             nan=0., posinf=0., neginf=0.)
-    vx, vy, vz = voxel_size_from_affine(qsm_nii.affine)
-    print(f"[veinseg] shape: {qsm.shape}  spacing: {vx:.3f} x {vy:.3f} x {vz:.3f} mm")
+    img_nii = nib.load(args.i)
+    img     = np.nan_to_num(img_nii.get_fdata(dtype=np.float32),
+                            nan=0., posinf=0., neginf=0.)
+    print(f"[veinseg] shape: {img.shape}  "
+          f"spacing: {' x '.join(f'{z:.3f}' for z in img_nii.header.get_zooms()[:3])} mm")
 
-    b0_img = b0_dir_from_image_affine(qsm_nii.affine, np.array(args.b0))
-    qsm_t  = torch.from_numpy(qsm).float()
-
-    # ---- channel 1: local field (ppm) ----
-    if args.local_field:
-        print(f"[veinseg] loading local field from {args.local_field}")
-        lf_nii = nib.load(args.local_field)
-        ch1    = np.nan_to_num(lf_nii.get_fdata(dtype=np.float32),
-                               nan=0., posinf=0., neginf=0.)
-        units = args.local_field_units
-        if units == "auto":
-            abs_p995 = float(np.percentile(np.abs(ch1[ch1 != 0]), 99.5)) \
-                       if (ch1 != 0).any() else 0.
-            units = "hz" if abs_p995 > 5.0 else "ppm"
-            print(f"[veinseg] local field abs-p99.5={abs_p995:.4f} "
-                  f"-> auto-detected: {units}")
-        HZ_TO_PPM = {"7t": 1.0 / (42.5774 * 7.0), "3t": 1.0 / (42.5774 * 3.0)}
-        if units == "hz":
-            ch1 = ch1 * HZ_TO_PPM[args.f.lower()]
-            print(f"[veinseg] converted Hz -> ppm "
-                  f"(factor={HZ_TO_PPM[args.f.lower()]:.6f})")
-        if ch1.shape != qsm.shape:
-            from scipy.ndimage import zoom as ndimage_zoom
-            zf  = tuple(q / l for q, l in zip(qsm.shape, ch1.shape))
-            print(f"[veinseg] resampling local field {ch1.shape} -> {qsm.shape}")
-            ch1 = ndimage_zoom(ch1, zf, order=1).astype(np.float32)
-    elif args.r == "r2star":
-        print("[veinseg] r2star without --local-field: using zero-filled local field")
-        ch1 = np.zeros_like(qsm)
-    else:
-        print("[veinseg] computing dipole local field from QSM ...")
-        ch1 = dipole_field_from_chi_xyz(
-            qsm_t, (vx, vy, vz), b0_img, return_units="ppm"
-        ).numpy()
-
-    # ---- channel 2: Frangi vesselness ----
-    print("[veinseg] computing Frangi vesselness ...")
-    qsm_z = (qsm_t - qsm_t.mean()) / (qsm_t.std() + 1e-8)
-    with torch.no_grad():
-        V, _ = frangi_3d(qsm_z.unsqueeze(0).unsqueeze(0),
-                         sigmas=FRANGI_SIGMAS,
-                         alpha=0.2, beta=0.3, c=5.0,
-                         bright_vessels=True)
-    ch2 = V[0, 0].numpy()
-    if args.frangi_erode_mm > 0:
-        # zero Frangi near the brain surface, as done for the training data
-        from scipy.ndimage import distance_transform_edt
-        brain = np.abs(qsm) > 1e-5
-        dist_mm = distance_transform_edt(brain, sampling=(vx, vy, vz))
-        ch2 = ch2 * (dist_mm > args.frangi_erode_mm)
-    print(f"[veinseg] Frangi max={ch2.max():.4f}  nonzero={(ch2 > 0).sum()}")
-
-    if args.out_field:
-        _save_nii(ch1, qsm_nii, args.out_field)
-        print(f"[veinseg] saved field  -> {args.out_field}")
-    if args.out_frangi:
-        _save_nii(ch2, qsm_nii, args.out_frangi)
-        print(f"[veinseg] saved Frangi -> {args.out_frangi}")
-
-    # ---- load checkpoint (downloads if needed) ----
+    # ---- load checkpoint ----
     checkpoint_path = get_checkpoint()
     print(f"[veinseg] loading checkpoint from {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
+
+    # Only the primary channel is used: its normalization is plans channel 0
+    dataset_json = dict(ckpt["init_args"]["dataset_json"])
+    dataset_json["channel_names"] = {"0": dataset_json["channel_names"]["0"]}
 
     plans_manager         = PlansManager(ckpt["init_args"]["plans"])
     configuration_manager = plans_manager.get_configuration(
@@ -212,7 +131,7 @@ def main():
         plans_manager=plans_manager,
         configuration_manager=configuration_manager,
         parameters=[model.state_dict()],
-        dataset_json=ckpt["init_args"]["dataset_json"],
+        dataset_json=dataset_json,
         trainer_name=ckpt["trainer_name"],
         inference_allowed_mirroring_axes=ckpt["inference_allowed_mirroring_axes"],
     )
@@ -221,16 +140,12 @@ def main():
     print("[veinseg] running inference ...")
     with tempfile.TemporaryDirectory() as tmpdir:
         ch0_path  = os.path.join(tmpdir, "case_0000.nii.gz")
-        ch1_path  = os.path.join(tmpdir, "case_0001.nii.gz")
-        ch2_path  = os.path.join(tmpdir, "case_0002.nii.gz")
         out_trunc = os.path.join(tmpdir, "case")
 
-        nib.save(nib.Nifti1Image(qsm, qsm_nii.affine, qsm_nii.header), ch0_path)
-        nib.save(nib.Nifti1Image(ch1, qsm_nii.affine, qsm_nii.header), ch1_path)
-        nib.save(nib.Nifti1Image(ch2, qsm_nii.affine, qsm_nii.header), ch2_path)
+        nib.save(nib.Nifti1Image(img, img_nii.affine, img_nii.header), ch0_path)
 
         predictor.predict_from_files(
-            list_of_lists_or_source_folder=[[ch0_path, ch1_path, ch2_path]],
+            list_of_lists_or_source_folder=[[ch0_path]],
             output_folder_or_list_of_truncated_output_files=[out_trunc],
             save_probabilities=True,
             overwrite=True,

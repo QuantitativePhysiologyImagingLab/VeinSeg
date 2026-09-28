@@ -17,7 +17,7 @@
 
 ## Overview
 
-VeinSeg is a 3D deep learning tool for automatic segmentation of cerebral veins from Quantitative Susceptibility Mapping (QSM). It is trained on multi-site, multi-field-strength data (3T and 7T) across five QSM reconstruction methods (TGV, MEDI, L1, STAR, iLSQR) and R2* maps and uses a physics-informed training objective combining:
+VeinSeg is a 3D deep learning tool for automatic segmentation of cerebral veins from Quantitative Susceptibility Mapping (QSM) or R2* maps. It is trained on multi-site, multi-field-strength data (3T and 7T) across five QSM reconstruction methods (TGV, MEDI, L1, STAR, iLSQR) and R2* maps, and uses a physics-informed training objective combining:
 
 - **Supervised** Dice + Cross-Entropy loss
 - **Self-supervised** physics-informed dipole field consistency loss
@@ -31,7 +31,7 @@ VeinSeg is a 3D deep learning tool for automatic segmentation of cerebral veins 
 
 The model is a 3D attention U-Net with a single-channel encoder and three key components:
 
-**Prior Attention Gating** — only the primary image (QSM or R2*) enters the encoder. It is modulated as `img · (1 + gate)`, where the gate is computed from the local field and Frangi prior channels, allowing the network to focus on regions with high vesselness response.
+**Prior Attention Gating** — only the primary image (QSM or R2*) enters the encoder. It is modulated as `img · (1 + gate)`. During training the gate is computed from the local field and Frangi vesselness priors, so they shape what the encoder learns; at inference no priors are needed and the gate reduces to its learned constant value.
 
 **Feature-wise Linear Modulation (FiLM)** — domain embeddings for reconstruction method (TGV / MEDI / L1 / STAR / iLSQR / R2*) and field strength (7T / 3T) condition every encoder stage via learned scale and shift, enabling the same model to generalise across acquisition protocols without retraining.
 
@@ -39,11 +39,7 @@ The model is a 3D attention U-Net with a single-channel encoder and three key co
 
 ### Inputs
 
-| Channel | Content | Units |
-|---|---|---|
-| 0 | QSM susceptibility map (or R2* map) — encoder input | ppm (1/s) |
-| 1 | Local field (measured or dipole-computed from QSM; zero-filled for R2* if not given) — gate prior | ppm |
-| 2 | Frangi vesselness of channel 0, zeroed within 5 mm of the brain edge — gate prior | [0, 1] |
+A single image: a QSM susceptibility map (ppm) or an R2* map (1/s). No local field or Frangi map is required.
 
 ### Output
 - Binary vein mask (argmax)
@@ -83,7 +79,7 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz
 
 | Flag | Description |
 |---|---|
-| `-i` | QSM susceptibility map (`.nii` / `.nii.gz`, ppm), or R2* map with `-r r2star` |
+| `-i` | QSM susceptibility map (`.nii` / `.nii.gz`, ppm), or R2* map (1/s) with `-r r2star` — the only input needed |
 | `-r` | Reconstruction method: `tgv` \| `medi` \| `l1` \| `star` \| `ilsqr` \| `r2star` |
 | `-f` | MRI field strength: `7t` \| `3t` |
 | `-o` | Output binary vein mask |
@@ -93,39 +89,28 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz
 
 | Flag | Default | Description |
 |---|---|---|
-| `--local-field PATH` | — | Measured background-removed local field instead of dipole-computed. Accepts Hz or ppm (auto-detected). |
-| `--local-field-units` | `auto` | Force units: `hz` \| `ppm` \| `auto` |
-| `--b0 X Y Z` | `0 0 1` | B0 direction in world/scanner axes |
-| `--frangi-erode-mm` | `5` | Zero the Frangi prior within this distance (mm) of the brain edge |
 | `--threshold` | `0.5` | Probability threshold for binary mask |
 | `--step-size` | `0.5` | Sliding window overlap as fraction of patch |
 | `--no-tta` | off | Disable test-time augmentation (mirroring) |
 | `--device` | `auto` | `auto` \| `cpu` \| `cuda` |
-| `--out-field PATH` | — | Save local field channel used (ppm) |
-| `--out-frangi PATH` | — | Save Frangi vesselness channel |
 
 ### Examples
 
 ```bash
-# Basic — dipole field computed automatically from QSM
-veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz
+# QSM
+veinseg -i qsm.nii.gz -r medi -f 3t -o mask.nii.gz -p prob.nii.gz
 
-# With measured local field (Romeo output in Hz — auto-detected)
-veinseg -i qsm.nii.gz -r medi -f 7t -o mask.nii.gz -p prob.nii.gz \
-        --local-field bgrm_field.nii.gz
+# R2*
+veinseg -i r2star.nii.gz -r r2star -f 3t -o mask.nii.gz -p prob.nii.gz
 
-# Inspect intermediate channels going into the model
+# CPU inference, no test-time augmentation (faster)
 veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz \
-        --out-field dipole_field.nii.gz --out-frangi frangi.nii.gz
-
-# CPU inference
-veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz \
-        --device cpu
+        --device cpu --no-tta
 ```
 
 ---
 
-## Supported QSM methods
+## Supported methods
 
 | Flag | Method |
 |---|---|
@@ -134,7 +119,7 @@ veinseg -i qsm.nii.gz -r tgv -f 7t -o mask.nii.gz -p prob.nii.gz \
 | `l1` | L1-regularised |
 | `star` | STAR-QSM |
 | `ilsqr` | Iterative LSQR |
-| `r2star` | R2* map (not QSM; pass `--local-field` if available) |
+| `r2star` | R2* map |
 
 ---
 

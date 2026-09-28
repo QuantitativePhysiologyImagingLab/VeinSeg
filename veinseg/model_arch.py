@@ -249,11 +249,13 @@ class PriorGatedSingleChannelUNet(UNetWithAttention):
 
 class PriorGatedSingleChannelUNetInfer(PriorGatedSingleChannelUNet):
     """
-    nnUNetPredictor entry point: takes the 3-channel preprocessed tensor
-    [primary, local field, Frangi] and splits it into image + priors.
+    nnUNetPredictor entry point. A 1-channel input uses the learned constant
+    prior gate; a 3-channel [primary, local field, Frangi] input uses the
+    priors to compute the gate, as during training.
     """
     def forward(self, x, domain_idx=None, field_idx=None, pos=None):
-        y = super().forward(x[:, 0:1], priors=x[:, 1:3],
+        priors = x[:, 1:3] if x.shape[1] > 1 else None
+        y = super().forward(x[:, 0:1], priors=priors,
                             domain_idx=domain_idx, field_idx=field_idx, pos=pos)
         if isinstance(y, (list, tuple)):
             return y[0]
